@@ -66,3 +66,37 @@ def get_fees(national_id: str):
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+# ----------------- فاحص صفحة النتائج المستقل (بدون لمس المصروفات) -----------------
+@app.get("/inspect_exam")
+def inspect_exam():
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        res = session.get("http://mised.svu.edu.eg/exam-result/", headers=headers, timeout=30)
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # جلب كل القوائم المنسدلة والخيارات
+        selects_data = []
+        for s in soup.find_all("select"):
+            s_name = s.get("name")
+            options = [{"text": opt.get_text(strip=True), "val": opt.get("value")} for opt in s.find_all("option")]
+            selects_data.append({"name": s_name, "options": options[:15]}) # أول 15 خيار
+
+        # جلب كل حقول الإدخال والأزرار
+        inputs_data = []
+        for inp in soup.find_all("input"):
+            inputs_data.append({
+                "type": inp.get("type"),
+                "name": inp.get("name"),
+                "value": inp.get("value")
+            })
+
+        return {
+            "status": "success",
+            "selects": selects_data,
+            "inputs": inputs_data
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
