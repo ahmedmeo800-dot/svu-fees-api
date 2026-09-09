@@ -1,39 +1,10 @@
-from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse
-import requests
-from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
-import io
-import re
+import time
 
-app = FastAPI()
-
-FEES_URL = "http://mispg.svu.edu.eg/svu_pg/enquery.aspx"
-RESULTS_URL = "http://mised.svu.edu.eg/exam-result/"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "ar,en;q=0.9"
-}
-
-@app.get("/")
-def read_root():
-    return {"status": "running", "service": "SVU Fees & Real Results Scraper"}
-
-# ----------------- فحص المصروفات -----------------
-@app.get("/get_fees")
-def get_fees(national_id: str):
-    session = requests.Session()
-    try:
-        res_get = session.get(FEES_URL, headers=HEADERS, timeout=45)
-        soup_get = BeautifulSoup(res_get.text, "html.parser")
-
-        def get_val(name):
-            el = soup_get.find("input", {"name": name})
-            return el["value"] if el and el.has_attr("value") else ""
-
-        payload = {
-            "__VIEWSTATE": get_val("__VIEWSTATE"),
+@app.get("/debug_med_result")
+def debug_med(year: str, seat_no: str):
+    """مسار تشخيصي يعيد لك محتوى الرد كنص لنتأكد من استجابة الموقع"""
+    data, err = scrape_medicine_result(year, seat_no)
+    return {"data": data, "error": err}
             "__VIEWSTATEGENERATOR": get_val("__VIEWSTATEGENERATOR"),
             "__EVENTVALIDATION": get_val("__EVENTVALIDATION"),
             "txt_nat_id": national_id,
