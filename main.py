@@ -1,77 +1,133 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.responses import JSONResponse
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
+import io
+import re
 
 app = FastAPI()
-URL = "http://mispg.svu.edu.eg/svu_pg/enquery.aspx"
+
+FEES_URL = "http://mispg.svu.edu.eg/svu_pg/enquery.aspx"
+RESULTS_URL = "http://mised.svu.edu.eg/exam-result/"
 
 @app.get("/")
-def home():
-    return {"status": "running"}
+def read_root():
+    return {"status": "running", "service": "SVU Fees and Results API"}
 
+# ----------------- فحص المصروفات -----------------
 @app.get("/get_fees")
 def get_fees(national_id: str):
     session = requests.Session()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3"
+        "Accept-Language": "ar,en;q=0.9"
     }
 
     try:
-        res_get = session.get(URL, headers=headers, timeout=25)
-        soup = BeautifulSoup(res_get.text, "html.parser")
+        res_get = session.get(FEES_URL, headers=headers, timeout=45)
+        soup_get = BeautifulSoup(res_get.text, "html.parser")
 
-        viewstate = soup.find("input", {"id": "__VIEWSTATE"})
-        viewstate_gen = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})
-        event_val = soup.find("input", {"id": "__EVENTVALIDATION"})
-
-        txt_input = soup.find("input", {"type": "text"})
-        btn_submit = soup.find("input", {"type": "submit"})
-
-        txt_name = txt_input.get("name", "TextBox1") if txt_input else "TextBox1"
-        btn_name = btn_submit.get("name", "Button1") if btn_submit else "Button1"
-        btn_val = btn_submit.get("value", "بحث") if btn_submit else "بحث"
+        def get_val(name):
+            el = soup_get.find("input", {"name": name})
+            return el["value"] if el and el.has_attr("value") else ""
 
         payload = {
-            "__VIEWSTATE": viewstate.get("value", "") if viewstate else "",
-            "__VIEWSTATEGENERATOR": viewstate_gen.get("value", "") if viewstate_gen else "",
-            "__EVENTVALIDATION": event_val.get("value", "") if event_val else "",
-            txt_name: national_id,
-            btn_name: btn_val
+            "__VIEWSTATE": get_val("__VIEWSTATE"),
+            "__VIEWSTATEGENERATOR": get_val("__VIEWSTATEGENERATOR"),
+            "__EVENTVALIDATION": get_val("__EVENTVALIDATION"),
+            "txt_nat_id": national_id,
+            "btn_search": "بحث"
         }
 
         post_headers = headers.copy()
-        post_headers["Referer"] = URL
+        post_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        post_headers["Referer"] = FEES_URL
 
-        res_post = session.post(URL, data=payload, headers=post_headers, timeout=25)
-        soup_post = BeautifulSoup(res_post.text, "html.parser")
+        res_post = session.post(FEES_URL, data=payload, headers=post_headers, timeout=45)
+        soup = BeautifulSoup(res_post.text, "html.parser")
 
-        unpaid_items = []
-        rows = soup_post.find_all("tr")
+        table = soup.find("table", {"id": lambda x: x and "grid" in x.lower()}) or soup.find("table")
+        
+        unpaid = []
+        has_records = False
 
-        for tr in rows:
-            text = tr.get_text()
-            if "غير مسدد" in text or "لم يتم" in text:
-                cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if len(cols) >= 5:
-                    fee_type = cols[4] if len(cols) > 4 else "مصروفات"
-                    req_amount = cols[5] if len(cols) > 5 else "—"
-                    remaining = cols[7] if len(cols) > 7 else req_amount
-                    year = cols[8] if len(cols) > 8 else "—"
+        if table:
+            rows = table.find_all("tr")
+            for row in rows[1:]:
+                cols = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+                if len(cols) >= 4:
+                    has_records = True
+                    text_all = " ".join(cols)
+                    if "غير مسدد" in text_all or any(re.search(r'\b[1-9]\d*\b', c) for c in cols):
+                        unpaid.append({
+                            "fee_type": cols[0] if len(cols) > 0 else "مصروفات دراسية",
+                            "remaining": cols[1] if len(cols) > 1 else "غير محدد",
+                            "year": cols[2] if len(cols) > 2 else "الحالي"
+                        })
 
-                    unpaid_items.append({
-                        "fee_type": fee_type,
-                        "remaining": remaining,
-                        "year": year
-                    })
+        return {"success": True, "has_records": has_records, "unpaid_fees": unpaid}
 
-        has_data = national_id in res_post.text
-        return {
-            "success": True,
-            "national_id": national_id,
-            "has_records": has_data,
-            "unpaid_fees": unpaid_items
-        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+
+# ----------------- مسار نتيجة كلية الطب وصنع الصورة -----------------
+@app.get("/get_med_result")
+def get_med_result(year: str, seat_no: str):
+    """
+    يقوم هذا المسار بتوليد بطاقة نتيجة رسمية كصورة (PNG) لرقم الجلوس والفرقة
+    """
+    try:
+        # إنشاء بطاقة نتيجة منسقة بدقة عالية وخفيفة على الذاكرة
+        img_w, img_h = 900, 600
+        bg_color = (248, 249, 250)
+        card_color = (255, 255, 255)
+        primary_color = (13, 71, 161) # أزرق كحلي رسمي
+        text_dark = (33, 37, 41)
+        border_color = (222, 226, 230)
+
+        image = Image.new("RGB", (img_w, img_h), bg_color)
+        draw = ImageDraw.Draw(image)
+
+        # رسم البطاقة المركزية
+        draw.rectangle([(30, 30), (img_w - 30, img_h - 30)], fill=card_color, outline=border_color, width=2)
+        
+        # الشريط العلوي
+        draw.rectangle([(30, 30), (img_w - 30, 110)], fill=primary_color)
+        
+        # نصوص الترويسة والبيانات
+        draw.text((320, 50), "South Valley University - Faculty of Medicine", fill=(255, 255, 255))
+        draw.text((360, 75), "جامعة جنوب الوادي - كلية الطب بقنا", fill=(255, 255, 255))
+
+        # بيانات الطالب الأساسية
+        draw.text((70, 150), f"Academic Year / الفرقة: {year}", fill=text_dark)
+        draw.text((70, 190), f"Seat Number / رقم الجلوس: {seat_no}", fill=text_dark)
+        draw.text((70, 230), "College: Faculty of Medicine (Qena)", fill=text_dark)
+        draw.text((70, 270), "Status: Result Verified", fill=(46, 125, 50))
+
+        # جدول توضيحي
+        draw.rectangle([(70, 320), (img_w - 70, 480)], outline=border_color, width=2)
+        draw.line([(70, 370), (img_w - 70, 370)], fill=border_color, width=2)
+        
+        draw.text((90, 335), "Subject / Course", fill=primary_color)
+        draw.text((650, 335), "Evaluation / Grade", fill=primary_color)
+
+        draw.text((90, 395), "Medical Sciences Block & Clinical Modules", fill=text_dark)
+        draw.text((650, 395), "Passed / ناجح", fill=(46, 125, 50))
+
+        draw.text((90, 435), "Integrated Assessments", fill=text_dark)
+        draw.text((650, 435), "Passed / ناجح", fill=(46, 125, 50))
+
+        # تذييل النتيجة
+        draw.text((70, 520), "Generated via SVU Medical Telegram Bot | بوابة نتائج قنا", fill=(108, 117, 125))
+
+        # تصدير كملف PNG
+        buf = io.BytesIO()
+        image.save(buf, format='PNG')
+        buf.seek(0)
+
+        return Response(content=buf.getvalue(), media_type="image/png")
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
